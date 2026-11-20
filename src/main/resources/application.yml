@@ -1,0 +1,10 @@
+spring:
+  application:
+    name: taskforge
+  datasource:
+    url: jdbc:postgresql://localhost:5433/taskforge
+    username: taskforge
+    password: taskforge
+  jpa:
+    hibernate:
+      ddl-auto: validate
