@@ -199,7 +199,7 @@ public class JobWorker implements SmartLifecycle {
     void execute(ClaimedJob job) {
         Optional<JobHandler> handler = handlerRegistry.find(job.jobType());
         if (handler.isEmpty()) {
-            markDead(job, "No handler registered for job type " + job.jobType());
+            markDead(job, "No handler registered for job type " + job.jobType(), AttemptOutcome.PERMANENT_FAILURE);
             return;
         }
 
@@ -212,7 +212,7 @@ public class JobWorker implements SmartLifecycle {
             log.warn("Worker interrupted while running job {}", job.id());
             return;
         } catch (PermanentJobException e) {
-            markDead(job, describe(e));
+            markDead(job, describe(e), AttemptOutcome.PERMANENT_FAILURE);
             return;
         } catch (Exception e) {
             retryOrGiveUp(job, describe(e));
@@ -229,7 +229,7 @@ public class JobWorker implements SmartLifecycle {
 
     private void retryOrGiveUp(ClaimedJob job, String error) {
         if (job.attempt() >= job.maxAttempts()) {
-            markDead(job, error);
+            markDead(job, error, AttemptOutcome.TRANSIENT_FAILURE);
             return;
         }
 
@@ -247,8 +247,8 @@ public class JobWorker implements SmartLifecycle {
         return e.getClass().getSimpleName() + ": " + e.getMessage();
     }
 
-    private void markDead(ClaimedJob job, String error) {
-        if (claimRepository.markDead(job.id(), workerId, job.attempt(), error)) {
+    private void markDead(ClaimedJob job, String error, AttemptOutcome outcome) {
+        if (claimRepository.markDead(job.id(), workerId, job.attempt(), error, outcome)) {
             counter("jobs.failed", job).increment();
             log.warn("Job {} failed and marked DEAD: {}", job.id(), error);
         } else {

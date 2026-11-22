@@ -115,6 +115,39 @@ class JobClaimRepositoryTest {
 
         assertThat(claimRepository.markCompleted(slow.id(), "slow-worker", slow.attempt())).isFalse();
         assertThat(claimRepository.markCompleted(fresh.id(), "fresh-worker", fresh.attempt())).isTrue();
+
+        // slow-worker'ın geç gelen sonucu deneme kaydını da değiştirmemeli
+        assertThat(attempts(slow.id()))
+                .containsExactly("1 slow-worker LEASE_EXPIRED", "2 fresh-worker SUCCESS");
+    }
+
+    @Test
+    void attemptHistory_recordsEveryTryWithItsWorkerAndOutcome() {
+        ClaimedJob first = claimRepository.claimNext("worker-1", 30).orElseThrow();
+        assertThat(attempts(first.id())).containsExactly("1 worker-1 null");
+
+        claimRepository.markRetry(first.id(), "worker-1", 1, "timeout", Duration.ZERO);
+        ClaimedJob second = claimRepository.claimNext("worker-2", 30).orElseThrow();
+        claimRepository.markCompleted(second.id(), "worker-2", 2);
+
+        assertThat(attempts(first.id()))
+                .containsExactly("1 worker-1 TRANSIENT_FAILURE", "2 worker-2 SUCCESS");
+        Integer unfinished = jdbc.sql("SELECT count(*) FROM job_attempts WHERE finished_at IS NULL")
+                .query(Integer.class)
+                .single();
+        assertThat(unfinished).isZero();
+    }
+
+    private List<String> attempts(UUID jobId) {
+        return jdbc.sql("""
+                        SELECT attempt_no || ' ' || worker_id || ' ' || coalesce(outcome, 'null')
+                        FROM job_attempts
+                        WHERE job_id = :jobId
+                        ORDER BY attempt_no
+                        """)
+                .param("jobId", jobId)
+                .query(String.class)
+                .list();
     }
 
     @Test

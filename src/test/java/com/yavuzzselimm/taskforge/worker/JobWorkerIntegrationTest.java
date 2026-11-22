@@ -95,6 +95,11 @@ class JobWorkerIntegrationTest {
 
         assertThat(job.getAttemptCount()).isEqualTo(3);
         assertThat(job.getLastError()).isNull();
+        assertThat(jdbc.sql("SELECT outcome FROM job_attempts WHERE job_id = :id ORDER BY attempt_no")
+                .param("id", id)
+                .query(String.class)
+                .list())
+                .containsExactly("TRANSIENT_FAILURE", "TRANSIENT_FAILURE", "SUCCESS");
     }
 
     @Test

@@ -88,6 +88,9 @@ class JobClaimConcurrencyTest {
                 .query(Integer.class)
                 .single();
         assertThat(notClaimedOnce).isZero();
+
+        Integer attemptRows = jdbc.sql("SELECT count(*) FROM job_attempts").query(Integer.class).single();
+        assertThat(attemptRows).isEqualTo(JOBS);
     }
 
     @Test
