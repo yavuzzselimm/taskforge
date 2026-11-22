@@ -1,0 +1,4 @@
+# Yalnızca worker: HTTP sunucusu açılmaz, sadece kuyruk işlenir.
+spring:
+  main:
+    web-application-type: none

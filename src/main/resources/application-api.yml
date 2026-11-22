@@ -1,0 +1,4 @@
+# Yalnızca API: işleri kabul eder, çalıştırmaz.
+taskforge:
+  worker:
+    enabled: false
