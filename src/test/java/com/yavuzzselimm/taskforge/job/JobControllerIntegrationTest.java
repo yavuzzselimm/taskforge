@@ -131,6 +131,21 @@ class JobControllerIntegrationTest {
                 .andExpect(status().isBadRequest());
     }
 
+    @Test
+    void unsupportedJobType_returns400() throws Exception {
+        mockMvc.perform(post("/api/v1/jobs")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"type":"MAKE_COFFEE","payload":{}}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.detail", startsWith("Unsupported job type: MAKE_COFFEE")));
+
+        assertThat(jobRepository.count()).isZero();
+    }
+
+
+
     /** İş oluşturur ve Location başlığını döndürür. */
     private String createJob(String idempotencyKey) throws Exception {
         var request = post("/api/v1/jobs")

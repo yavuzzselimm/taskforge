@@ -1,5 +1,6 @@
 package com.yavuzzselimm.taskforge.job;
 
+import com.yavuzzselimm.taskforge.handler.JobHandlerRegistry;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -16,9 +17,11 @@ public class JobService {
     static final int DEFAULT_MAX_ATTEMPTS = 5;
 
     private final JobRepository jobRepository;
+    private final JobHandlerRegistry handlerRegistry;
 
-    public JobService(JobRepository jobRepository) {
+    public JobService(JobRepository jobRepository, JobHandlerRegistry handlerRegistry) {
         this.jobRepository = jobRepository;
+        this.handlerRegistry = handlerRegistry;
     }
 
     /**
@@ -26,6 +29,7 @@ public class JobService {
      * yenisini oluşturmaz, mevcut işi döndürür.
      */
     public CreateJobResult create(CreateJobRequest request, String idempotencyKey) {
+        validateJobType(request.type());
         validateIdempotencyKey(idempotencyKey);
         String payloadJson = toPayloadJson(request);
 
@@ -64,6 +68,14 @@ public class JobService {
     public Job get(UUID id) {
         return jobRepository.findById(id)
                 .orElseThrow(() -> new JobNotFoundException(id));
+    }
+
+    private void validateJobType(String jobType) {
+        if (!handlerRegistry.supports(jobType)) {
+            throw new InvalidJobRequestException(
+                    "Unsupported job type: " + jobType
+                            + ". Supported types: " + handlerRegistry.supportedTypes());
+        }
     }
 
     private void validateIdempotencyKey(String key) {
