@@ -16,6 +16,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -33,6 +34,7 @@ public class JobWorker implements SmartLifecycle {
     private final JobHandlerRegistry handlerRegistry;
     private final long leaseSeconds;
     private final long pollIntervalMs;
+    private final long pollJitterMs;
     private final int threads;
     private final long shutdownTimeoutSeconds;
     private final String workerId;
@@ -46,6 +48,7 @@ public class JobWorker implements SmartLifecycle {
                      JobHandlerRegistry handlerRegistry,
                      @Value("${taskforge.worker.lease-seconds:30}") long leaseSeconds,
                      @Value("${taskforge.worker.poll-interval-ms:1000}") long pollIntervalMs,
+                     @Value("${taskforge.worker.poll-jitter-ms:200}") long pollJitterMs,
                      @Value("${taskforge.worker.threads:4}") int threads,
                      @Value("${taskforge.worker.shutdown-timeout-seconds:20}") long shutdownTimeoutSeconds,
                      @Value("${taskforge.worker.id:}") String configuredWorkerId) {
@@ -56,6 +59,7 @@ public class JobWorker implements SmartLifecycle {
         this.handlerRegistry = handlerRegistry;
         this.leaseSeconds = leaseSeconds;
         this.pollIntervalMs = pollIntervalMs;
+        this.pollJitterMs = pollJitterMs;
         this.threads = threads;
         this.shutdownTimeoutSeconds = shutdownTimeoutSeconds;
         this.workerId = configuredWorkerId.isBlank() ? generateWorkerId() : configuredWorkerId;
@@ -103,7 +107,7 @@ public class JobWorker implements SmartLifecycle {
                 Optional<ClaimedJob> claimed = claimSafely();
                 if (claimed.isEmpty()) {
                     freeSlots.release();
-                    Thread.sleep(pollIntervalMs);
+                    Thread.sleep(nextPollDelayMs());
                     continue;
                 }
                 submit(claimed.get());
@@ -111,6 +115,14 @@ public class JobWorker implements SmartLifecycle {
                 break;
             }
         }
+    }
+
+    // Aynı anda açılan worker'lar DB'ye hep aynı anda gitmesin diye bekleme süresine rastgele ek
+    private long nextPollDelayMs() {
+        if (pollJitterMs <= 0) {
+            return pollIntervalMs;
+        }
+        return pollIntervalMs + ThreadLocalRandom.current().nextLong(pollJitterMs + 1);
     }
 
     private Optional<ClaimedJob> claimSafely() {

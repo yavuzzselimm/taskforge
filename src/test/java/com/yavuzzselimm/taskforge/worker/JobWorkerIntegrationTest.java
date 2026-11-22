@@ -28,6 +28,7 @@ import static org.assertj.core.api.Assertions.fail;
 @SpringBootTest(properties = {
         "taskforge.worker.enabled=true",
         "taskforge.worker.poll-interval-ms=100",
+        "taskforge.worker.poll-jitter-ms=50",
         "taskforge.worker.threads=4"
 })
 @Import({TestcontainersConfiguration.class, JobWorkerIntegrationTest.TestHandlersConfig.class})
