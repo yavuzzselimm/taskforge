@@ -12,3 +12,9 @@ spring:
   mvc:
     problemdetails:
       enabled: true
+
+taskforge:
+  worker:
+    enabled: true
+    poll-interval-ms: 1000
+    lease-seconds: 30

@@ -13,7 +13,7 @@ import java.util.concurrent.*;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@SpringBootTest
+@SpringBootTest(properties = "taskforge.worker.enabled=false")
 @Import(TestcontainersConfiguration.class)
 class JobIdempotencyConcurrencyTest {
 
