@@ -3,6 +3,8 @@ package com.yavuzzselimm.taskforge.worker;
 import com.yavuzzselimm.taskforge.handler.JobContext;
 import com.yavuzzselimm.taskforge.handler.JobHandler;
 import com.yavuzzselimm.taskforge.handler.JobHandlerRegistry;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -32,6 +34,7 @@ public class JobWorker implements SmartLifecycle {
 
     private final JobClaimRepository claimRepository;
     private final JobHandlerRegistry handlerRegistry;
+    private final MeterRegistry meterRegistry;
     private final long leaseSeconds;
     private final long pollIntervalMs;
     private final long pollJitterMs;
@@ -46,6 +49,7 @@ public class JobWorker implements SmartLifecycle {
 
     public JobWorker(JobClaimRepository claimRepository,
                      JobHandlerRegistry handlerRegistry,
+                     MeterRegistry meterRegistry,
                      @Value("${taskforge.worker.lease-seconds:30}") long leaseSeconds,
                      @Value("${taskforge.worker.poll-interval-ms:1000}") long pollIntervalMs,
                      @Value("${taskforge.worker.poll-jitter-ms:200}") long pollJitterMs,
@@ -57,6 +61,7 @@ public class JobWorker implements SmartLifecycle {
         }
         this.claimRepository = claimRepository;
         this.handlerRegistry = handlerRegistry;
+        this.meterRegistry = meterRegistry;
         this.leaseSeconds = leaseSeconds;
         this.pollIntervalMs = pollIntervalMs;
         this.pollJitterMs = pollJitterMs;
@@ -174,6 +179,7 @@ public class JobWorker implements SmartLifecycle {
         }
 
         if (claimRepository.markCompleted(job.id(), workerId, job.attempt())) {
+            counter("jobs.completed", job).increment();
             log.info("Job {} completed (type {}, attempt {})", job.id(), job.jobType(), job.attempt());
         } else {
             log.warn("Job {} was no longer owned by this worker; result discarded", job.id());
@@ -182,10 +188,18 @@ public class JobWorker implements SmartLifecycle {
 
     private void markDead(ClaimedJob job, String error) {
         if (claimRepository.markDead(job.id(), workerId, job.attempt(), error)) {
+            counter("jobs.failed", job).increment();
             log.warn("Job {} failed and marked DEAD: {}", job.id(), error);
         } else {
             log.warn("Job {} failed but was no longer owned by this worker", job.id());
         }
+    }
+
+    // Label olarak yalnızca job_type: job ID label yapılırsa her iş yeni bir zaman serisi açar
+    private Counter counter(String name, ClaimedJob job) {
+        return Counter.builder(name)
+                .tag("job_type", job.jobType())
+                .register(meterRegistry);
     }
 
     public String workerId() {

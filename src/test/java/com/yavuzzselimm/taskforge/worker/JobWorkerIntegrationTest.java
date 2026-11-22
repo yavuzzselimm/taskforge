@@ -4,6 +4,8 @@ import com.yavuzzselimm.taskforge.TestcontainersConfiguration;
 import com.yavuzzselimm.taskforge.handler.JobContext;
 import com.yavuzzselimm.taskforge.handler.JobHandler;
 import com.yavuzzselimm.taskforge.job.*;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -42,6 +44,9 @@ class JobWorkerIntegrationTest {
 
     @Autowired
     private CountingHandler countingHandler;
+
+    @Autowired
+    private MeterRegistry meterRegistry;
 
     @BeforeEach
     void cleanDatabase() {
@@ -98,6 +103,31 @@ class JobWorkerIntegrationTest {
         assertThat(countingHandler.executions().values()).allMatch(count -> count.get() == 1);
         // gerçekten paralel çalıştı mı, ve thread sayısını aştı mı?
         assertThat(countingHandler.maxConcurrent()).isBetween(2, 4);
+    }
+
+    @Test
+    void completedAndFailedJobs_areCountedByJobType() throws InterruptedException {
+        double completedBefore = counterValue("jobs.completed", "SEND_ORDER_EMAIL");
+        double failedBefore = counterValue("jobs.failed", "ALWAYS_FAIL");
+
+        awaitStatus(createJob("SEND_ORDER_EMAIL", null), JobStatus.COMPLETED);
+        awaitStatus(createJob("ALWAYS_FAIL", null), JobStatus.DEAD);
+
+        // sayaç, DB güncellemesinden hemen sonra artıyor; kısa bir an beklemek gerekebilir
+        Instant deadline = Instant.now().plusSeconds(2);
+        while (Instant.now().isBefore(deadline)
+                && (counterValue("jobs.completed", "SEND_ORDER_EMAIL") < completedBefore + 1
+                || counterValue("jobs.failed", "ALWAYS_FAIL") < failedBefore + 1)) {
+            Thread.sleep(20);
+        }
+
+        assertThat(counterValue("jobs.completed", "SEND_ORDER_EMAIL")).isEqualTo(completedBefore + 1);
+        assertThat(counterValue("jobs.failed", "ALWAYS_FAIL")).isEqualTo(failedBefore + 1);
+    }
+
+    private double counterValue(String name, String jobType) {
+        Counter counter = meterRegistry.find(name).tag("job_type", jobType).counter();
+        return counter == null ? 0 : counter.count();
     }
 
     private UUID createJob(String type, Instant scheduledAt) {

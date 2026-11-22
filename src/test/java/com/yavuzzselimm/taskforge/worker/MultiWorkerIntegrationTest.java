@@ -5,6 +5,7 @@ import com.yavuzzselimm.taskforge.handler.JobContext;
 import com.yavuzzselimm.taskforge.handler.JobHandler;
 import com.yavuzzselimm.taskforge.handler.JobHandlerRegistry;
 import com.yavuzzselimm.taskforge.job.JobRepository;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -42,6 +43,9 @@ class MultiWorkerIntegrationTest {
     private JobHandlerRegistry handlerRegistry;
 
     @Autowired
+    private MeterRegistry meterRegistry;
+
+    @Autowired
     private JobRepository jobRepository;
 
     @Autowired
@@ -72,7 +76,7 @@ class MultiWorkerIntegrationTest {
                 .update();
 
         for (String id : List.of("worker-a", "worker-b", "worker-c")) {
-            JobWorker worker = new JobWorker(claimRepository, handlerRegistry,
+            JobWorker worker = new JobWorker(claimRepository, handlerRegistry, meterRegistry,
                     30, 50, 20, 2, 5, id);
             workers.add(worker);
             worker.start();
