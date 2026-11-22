@@ -233,7 +233,7 @@ public class JobWorker implements SmartLifecycle {
             counter("jobs.completed", job).increment();
             log.info("Job {} completed (type {}, attempt {})", job.id(), job.jobType(), job.attempt());
         } else {
-            log.warn("Job {} was no longer owned by this worker; result discarded", job.id());
+            staleResult(job);
         }
     }
 
@@ -249,8 +249,15 @@ public class JobWorker implements SmartLifecycle {
             log.warn("Job {} failed (attempt {}/{}), retrying in {} ms: {}",
                     job.id(), job.attempt(), job.maxAttempts(), delay.toMillis(), error);
         } else {
-            log.warn("Job {} failed but was no longer owned by this worker", job.id());
+            staleResult(job);
         }
+    }
+
+    // İş bu arada recovery ile başka birine geçti; sonucumuz reddedildi
+    private void staleResult(ClaimedJob job) {
+        counter("stale.result.writes", job).increment();
+        log.warn("Job {} (attempt {}) is no longer owned by this worker; result discarded",
+                job.id(), job.attempt());
     }
 
     private static String describe(Exception e) {
@@ -262,7 +269,7 @@ public class JobWorker implements SmartLifecycle {
             counter("jobs.failed", job).increment();
             log.warn("Job {} failed and marked DEAD: {}", job.id(), error);
         } else {
-            log.warn("Job {} failed but was no longer owned by this worker", job.id());
+            staleResult(job);
         }
     }
 

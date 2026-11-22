@@ -167,6 +167,33 @@ class JobWorkerIntegrationTest {
     }
 
     @Test
+    void resultOfWorkerThatLostItsJob_isDiscardedAndCounted() throws InterruptedException {
+        double staleBefore = counterValue("stale.result.writes", "FLAKY");
+        UUID id = createJob("FLAKY", JsonNodeFactory.instance.objectNode().put("sleepMs", 1500), 5);
+        awaitStatus(id, JobStatus.RUNNING);
+
+        // iş çalışırken başka bir worker'a geçmiş gibi yap (recovery'nin yapacağı şey)
+        jdbc.sql("""
+                        UPDATE jobs
+                        SET locked_by = 'other-worker', lease_until = now() + interval '1 hour'
+                        WHERE id = :id
+                        """)
+                .param("id", id)
+                .update();
+
+        Instant deadline = Instant.now().plusSeconds(5);
+        while (Instant.now().isBefore(deadline)
+                && counterValue("stale.result.writes", "FLAKY") < staleBefore + 1) {
+            Thread.sleep(50);
+        }
+        assertThat(counterValue("stale.result.writes", "FLAKY")).isEqualTo(staleBefore + 1);
+
+        Job job = jobRepository.findById(id).orElseThrow();
+        assertThat(job.getStatus()).isEqualTo(JobStatus.RUNNING);
+        assertThat(job.getLockedBy()).isEqualTo("other-worker");
+    }
+
+    @Test
     void jobScheduledInTheFuture_isNotPickedUpYet() throws InterruptedException {
         UUID id = createJob("SEND_ORDER_EMAIL", Instant.now().plus(Duration.ofHours(1)));
 
