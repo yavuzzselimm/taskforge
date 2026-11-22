@@ -3,6 +3,7 @@ package com.yavuzzselimm.taskforge.worker;
 import com.yavuzzselimm.taskforge.handler.JobContext;
 import com.yavuzzselimm.taskforge.handler.JobHandler;
 import com.yavuzzselimm.taskforge.handler.JobHandlerRegistry;
+import com.yavuzzselimm.taskforge.handler.PermanentJobException;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
@@ -12,6 +13,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
 
+import java.time.Duration;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
@@ -34,6 +36,7 @@ public class JobWorker implements SmartLifecycle {
 
     private final JobClaimRepository claimRepository;
     private final JobHandlerRegistry handlerRegistry;
+    private final RetryPolicy retryPolicy;
     private final MeterRegistry meterRegistry;
     private final long leaseSeconds;
     private final long pollIntervalMs;
@@ -49,6 +52,7 @@ public class JobWorker implements SmartLifecycle {
 
     public JobWorker(JobClaimRepository claimRepository,
                      JobHandlerRegistry handlerRegistry,
+                     RetryPolicy retryPolicy,
                      MeterRegistry meterRegistry,
                      @Value("${taskforge.worker.lease-seconds:30}") long leaseSeconds,
                      @Value("${taskforge.worker.poll-interval-ms:1000}") long pollIntervalMs,
@@ -61,6 +65,7 @@ public class JobWorker implements SmartLifecycle {
         }
         this.claimRepository = claimRepository;
         this.handlerRegistry = handlerRegistry;
+        this.retryPolicy = retryPolicy;
         this.meterRegistry = meterRegistry;
         this.leaseSeconds = leaseSeconds;
         this.pollIntervalMs = pollIntervalMs;
@@ -173,8 +178,11 @@ public class JobWorker implements SmartLifecycle {
             Thread.currentThread().interrupt();
             log.warn("Worker interrupted while running job {}", job.id());
             return;
+        } catch (PermanentJobException e) {
+            markDead(job, describe(e));
+            return;
         } catch (Exception e) {
-            markDead(job, e.getClass().getSimpleName() + ": " + e.getMessage());
+            retryOrGiveUp(job, describe(e));
             return;
         }
 
@@ -184,6 +192,26 @@ public class JobWorker implements SmartLifecycle {
         } else {
             log.warn("Job {} was no longer owned by this worker; result discarded", job.id());
         }
+    }
+
+    private void retryOrGiveUp(ClaimedJob job, String error) {
+        if (job.attempt() >= job.maxAttempts()) {
+            markDead(job, error);
+            return;
+        }
+
+        Duration delay = retryPolicy.delayAfter(job.attempt());
+        if (claimRepository.markRetry(job.id(), workerId, job.attempt(), error, delay)) {
+            counter("job.retries", job).increment();
+            log.warn("Job {} failed (attempt {}/{}), retrying in {} ms: {}",
+                    job.id(), job.attempt(), job.maxAttempts(), delay.toMillis(), error);
+        } else {
+            log.warn("Job {} failed but was no longer owned by this worker", job.id());
+        }
+    }
+
+    private static String describe(Exception e) {
+        return e.getClass().getSimpleName() + ": " + e.getMessage();
     }
 
     private void markDead(ClaimedJob job, String error) {

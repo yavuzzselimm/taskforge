@@ -21,6 +21,12 @@ taskforge:
     lease-seconds: 30
     threads: 4
     shutdown-timeout-seconds: 20
+  retry:
+    base-delay-ms: 1000
+    max-delay-ms: 300000
+  handlers:
+    flaky:
+      enabled: false
 
 management:
   endpoints:

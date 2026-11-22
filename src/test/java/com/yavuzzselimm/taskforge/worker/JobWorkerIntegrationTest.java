@@ -13,6 +13,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
+import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.node.JsonNodeFactory;
 
 import java.time.Duration;
@@ -31,7 +32,10 @@ import static org.assertj.core.api.Assertions.fail;
         "taskforge.worker.enabled=true",
         "taskforge.worker.poll-interval-ms=100",
         "taskforge.worker.poll-jitter-ms=50",
-        "taskforge.worker.threads=4"
+        "taskforge.worker.threads=4",
+        "taskforge.retry.base-delay-ms=50",
+        "taskforge.retry.max-delay-ms=200",
+        "taskforge.handlers.flaky.enabled=true"
 })
 @Import({TestcontainersConfiguration.class, JobWorkerIntegrationTest.TestHandlersConfig.class})
 class JobWorkerIntegrationTest {
@@ -67,13 +71,33 @@ class JobWorkerIntegrationTest {
     }
 
     @Test
-    void failingJob_isMarkedDeadWithError() {
+    void failingJob_isRetriedUntilAttemptsRunOut_thenMarkedDead() {
         UUID id = createJob("ALWAYS_FAIL", null);
 
         Job job = awaitStatus(id, JobStatus.DEAD);
 
-        assertThat(job.getAttemptCount()).isEqualTo(1);
+        assertThat(job.getAttemptCount()).isEqualTo(job.getMaxAttempts());
         assertThat(job.getLastError()).contains("simulated failure");
+    }
+
+    @Test
+    void transientFailures_areRetriedUntilTheJobSucceeds() {
+        UUID id = createJob("FLAKY", JsonNodeFactory.instance.objectNode().put("failTimes", 2), 5);
+
+        Job job = awaitStatus(id, JobStatus.COMPLETED);
+
+        assertThat(job.getAttemptCount()).isEqualTo(3);
+        assertThat(job.getLastError()).isNull();
+    }
+
+    @Test
+    void permanentFailure_isNotRetried() {
+        UUID id = createJob("FLAKY", JsonNodeFactory.instance.objectNode().put("permanent", true), 5);
+
+        Job job = awaitStatus(id, JobStatus.DEAD);
+
+        assertThat(job.getAttemptCount()).isEqualTo(1);
+        assertThat(job.getLastError()).contains("PermanentJobException");
     }
 
     @Test
@@ -109,6 +133,7 @@ class JobWorkerIntegrationTest {
     void completedAndFailedJobs_areCountedByJobType() throws InterruptedException {
         double completedBefore = counterValue("jobs.completed", "SEND_ORDER_EMAIL");
         double failedBefore = counterValue("jobs.failed", "ALWAYS_FAIL");
+        double retriesBefore = counterValue("job.retries", "ALWAYS_FAIL");
 
         awaitStatus(createJob("SEND_ORDER_EMAIL", null), JobStatus.COMPLETED);
         awaitStatus(createJob("ALWAYS_FAIL", null), JobStatus.DEAD);
@@ -123,11 +148,18 @@ class JobWorkerIntegrationTest {
 
         assertThat(counterValue("jobs.completed", "SEND_ORDER_EMAIL")).isEqualTo(completedBefore + 1);
         assertThat(counterValue("jobs.failed", "ALWAYS_FAIL")).isEqualTo(failedBefore + 1);
+        // varsayılan 5 deneme: 4 tekrar, sonra DEAD
+        assertThat(counterValue("job.retries", "ALWAYS_FAIL")).isEqualTo(retriesBefore + 4);
     }
 
     private double counterValue(String name, String jobType) {
         Counter counter = meterRegistry.find(name).tag("job_type", jobType).counter();
         return counter == null ? 0 : counter.count();
+    }
+
+    private UUID createJob(String type, JsonNode payload, Integer maxAttempts) {
+        CreateJobRequest request = new CreateJobRequest(type, payload, null, null, maxAttempts);
+        return jobService.create(request, null).job().getId();
     }
 
     private UUID createJob(String type, Instant scheduledAt) {

@@ -43,6 +43,9 @@ class MultiWorkerIntegrationTest {
     private JobHandlerRegistry handlerRegistry;
 
     @Autowired
+    private RetryPolicy retryPolicy;
+
+    @Autowired
     private MeterRegistry meterRegistry;
 
     @Autowired
@@ -76,7 +79,7 @@ class MultiWorkerIntegrationTest {
                 .update();
 
         for (String id : List.of("worker-a", "worker-b", "worker-c")) {
-            JobWorker worker = new JobWorker(claimRepository, handlerRegistry, meterRegistry,
+            JobWorker worker = new JobWorker(claimRepository, handlerRegistry, retryPolicy, meterRegistry,
                     30, 50, 20, 2, 5, id);
             workers.add(worker);
             worker.start();

@@ -3,6 +3,7 @@ package com.yavuzzselimm.taskforge.worker;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
 
+import java.time.Duration;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -36,7 +37,7 @@ public class JobClaimRepository {
                             LIMIT 1
                             FOR UPDATE SKIP LOCKED
                         )
-                        RETURNING id, job_type, payload::text AS payload, attempt_count
+                        RETURNING id, job_type, payload::text AS payload, attempt_count, max_attempts
                         """)
                 .param("workerId", workerId)
                 .param("leaseSeconds", leaseSeconds)
@@ -44,7 +45,8 @@ public class JobClaimRepository {
                         rs.getObject("id", UUID.class),
                         rs.getString("job_type"),
                         rs.getString("payload"),
-                        rs.getInt("attempt_count")))
+                        rs.getInt("attempt_count"),
+                        rs.getInt("max_attempts")))
                 .optional();
     }
 
@@ -87,6 +89,30 @@ public class JobClaimRepository {
                 .param("workerId", workerId)
                 .param("attempt", attempt)
                 .param("error", truncate(error))
+                .update();
+        return updated == 1;
+    }
+
+    public boolean markRetry(UUID jobId, String workerId, int attempt, String error, Duration delay) {
+        int updated = jdbc.sql("""
+                        UPDATE jobs
+                        SET status       = 'RETRY_WAIT',
+                            available_at = now() + (:delayMs * interval '1 millisecond'),
+                            locked_by    = NULL,
+                            lease_until  = NULL,
+                            heartbeat_at = NULL,
+                            last_error   = :error,
+                            updated_at   = now()
+                        WHERE id = :id
+                          AND status = 'RUNNING'
+                          AND locked_by = :workerId
+                          AND attempt_count = :attempt
+                        """)
+                .param("id", jobId)
+                .param("workerId", workerId)
+                .param("attempt", attempt)
+                .param("error", truncate(error))
+                .param("delayMs", delay.toMillis())
                 .update();
         return updated == 1;
     }
