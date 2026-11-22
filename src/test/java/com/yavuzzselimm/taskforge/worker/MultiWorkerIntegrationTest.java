@@ -43,6 +43,12 @@ class MultiWorkerIntegrationTest {
     private JobHandlerRegistry handlerRegistry;
 
     @Autowired
+    private RetryPolicy retryPolicy;
+
+    @Autowired
+    private WorkerRepository workerRepository;
+
+    @Autowired
     private MeterRegistry meterRegistry;
 
     @Autowired
@@ -76,8 +82,8 @@ class MultiWorkerIntegrationTest {
                 .update();
 
         for (String id : List.of("worker-a", "worker-b", "worker-c")) {
-            JobWorker worker = new JobWorker(claimRepository, handlerRegistry, meterRegistry,
-                    30, 50, 20, 2, 5, id);
+            JobWorker worker = new JobWorker(claimRepository, workerRepository, handlerRegistry, retryPolicy, meterRegistry,
+                    new WorkerProperties(id, 2, 50, 20, 30, 10_000, 5));
             workers.add(worker);
             worker.start();
         }
@@ -88,6 +94,16 @@ class MultiWorkerIntegrationTest {
         assertThat(recordingHandler.runsPerJob().values()).allMatch(runs -> runs.get() == 1);
         assertThat(recordingHandler.jobsPerWorker().keySet())
                 .containsExactlyInAnyOrder("worker-a", "worker-b", "worker-c");
+
+        workers.forEach(JobWorker::stop);
+        workers.clear();
+        List<String> stopped = jdbc.sql("""
+                        SELECT worker_id FROM workers
+                        WHERE worker_id IN ('worker-a', 'worker-b', 'worker-c') AND status = 'STOPPED'
+                        """)
+                .query(String.class)
+                .list();
+        assertThat(stopped).containsExactlyInAnyOrder("worker-a", "worker-b", "worker-c");
     }
 
     private void awaitAllCompleted() throws InterruptedException {

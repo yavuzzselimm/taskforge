@@ -7,6 +7,7 @@ public record ClaimedJob(
         UUID id,
         String jobType,
         String payload,
-        int attempt
+        int attempt,
+        int maxAttempts
 ) {
 }

@@ -19,8 +19,18 @@ taskforge:
     poll-interval-ms: 1000
     poll-jitter-ms: 200
     lease-seconds: 30
+    heartbeat-interval-ms: 10000
     threads: 4
     shutdown-timeout-seconds: 20
+  recovery:
+    interval-ms: 5000
+    batch-size: 100
+  retry:
+    base-delay-ms: 1000
+    max-delay-ms: 300000
+  handlers:
+    flaky:
+      enabled: false
 
 management:
   endpoints:

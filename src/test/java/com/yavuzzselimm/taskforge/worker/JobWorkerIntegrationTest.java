@@ -13,8 +13,11 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
+import org.springframework.jdbc.core.simple.JdbcClient;
+import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.node.JsonNodeFactory;
 
+import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -31,7 +34,13 @@ import static org.assertj.core.api.Assertions.fail;
         "taskforge.worker.enabled=true",
         "taskforge.worker.poll-interval-ms=100",
         "taskforge.worker.poll-jitter-ms=50",
-        "taskforge.worker.threads=4"
+        "taskforge.worker.threads=4",
+        "taskforge.retry.base-delay-ms=50",
+        "taskforge.retry.max-delay-ms=200",
+        "taskforge.handlers.flaky.enabled=true",
+        "taskforge.recovery.interval-ms=200",
+        "taskforge.worker.lease-seconds=2",
+        "taskforge.worker.heartbeat-interval-ms=500"
 })
 @Import({TestcontainersConfiguration.class, JobWorkerIntegrationTest.TestHandlersConfig.class})
 class JobWorkerIntegrationTest {
@@ -47,6 +56,12 @@ class JobWorkerIntegrationTest {
 
     @Autowired
     private MeterRegistry meterRegistry;
+
+    @Autowired
+    private JdbcClient jdbc;
+
+    @Autowired
+    private JobWorker worker;
 
     @BeforeEach
     void cleanDatabase() {
@@ -67,13 +82,115 @@ class JobWorkerIntegrationTest {
     }
 
     @Test
-    void failingJob_isMarkedDeadWithError() {
+    void failingJob_isRetriedUntilAttemptsRunOut_thenMarkedDead() {
         UUID id = createJob("ALWAYS_FAIL", null);
 
         Job job = awaitStatus(id, JobStatus.DEAD);
 
-        assertThat(job.getAttemptCount()).isEqualTo(1);
+        assertThat(job.getAttemptCount()).isEqualTo(job.getMaxAttempts());
         assertThat(job.getLastError()).contains("simulated failure");
+    }
+
+    @Test
+    void transientFailures_areRetriedUntilTheJobSucceeds() {
+        UUID id = createJob("FLAKY", JsonNodeFactory.instance.objectNode().put("failTimes", 2), 5);
+
+        Job job = awaitStatus(id, JobStatus.COMPLETED);
+
+        assertThat(job.getAttemptCount()).isEqualTo(3);
+        assertThat(job.getLastError()).isNull();
+        assertThat(jdbc.sql("SELECT outcome FROM job_attempts WHERE job_id = :id ORDER BY attempt_no")
+                .param("id", id)
+                .query(String.class)
+                .list())
+                .containsExactly("TRANSIENT_FAILURE", "TRANSIENT_FAILURE", "SUCCESS");
+    }
+
+    @Test
+    void permanentFailure_isNotRetried() {
+        UUID id = createJob("FLAKY", JsonNodeFactory.instance.objectNode().put("permanent", true), 5);
+
+        Job job = awaitStatus(id, JobStatus.DEAD);
+
+        assertThat(job.getAttemptCount()).isEqualTo(1);
+        assertThat(job.getLastError()).contains("PermanentJobException");
+    }
+
+    @Test
+    void jobHeldByCrashedWorker_isRecoveredAndCompleted() {
+        // çökmüş bir worker'ın elinde kalmış gibi: RUNNING, lease'i dolmuş
+        UUID id = jdbc.sql("""
+                        INSERT INTO jobs (job_type, payload, status, locked_by, lease_until, attempt_count)
+                        VALUES ('SEND_ORDER_EMAIL', '{"orderId": "ORD-1"}'::jsonb, 'RUNNING',
+                                'crashed-worker', now() - interval '1 second', 1)
+                        RETURNING id
+                        """)
+                .query(UUID.class)
+                .single();
+
+        Job job = awaitStatus(id, JobStatus.COMPLETED);
+
+        assertThat(job.getAttemptCount()).isEqualTo(2);
+    }
+
+    @Test
+    void jobRunningLongerThanItsLease_isKeptAliveByHeartbeats() {
+        double expiredBefore = counterValue("expired.leases", "FLAKY");
+        // lease 2 saniye, iş 3,5 saniye sürüyor; heartbeat olmasa recovery işi elinden alırdı
+        UUID id = createJob("FLAKY", JsonNodeFactory.instance.objectNode().put("sleepMs", 3500), 5);
+
+        Job job = awaitStatus(id, JobStatus.COMPLETED, Duration.ofSeconds(10));
+
+        assertThat(job.getAttemptCount()).isEqualTo(1);
+        assertThat(counterValue("expired.leases", "FLAKY")).isEqualTo(expiredBefore);
+    }
+
+    @Test
+    void worker_isRegisteredAndKeepsItsHeartbeatFresh() throws InterruptedException {
+        String sql = """
+                SELECT status || ' ' || capacity FROM workers WHERE worker_id = :id
+                """;
+        assertThat(jdbc.sql(sql).param("id", worker.workerId()).query(String.class).single())
+                .isEqualTo("RUNNING 4");
+
+        Instant first = lastHeartbeat();
+        Thread.sleep(1200);   // heartbeat 500 ms'de bir
+        assertThat(lastHeartbeat()).isAfter(first);
+    }
+
+    private Instant lastHeartbeat() {
+        return jdbc.sql("SELECT last_heartbeat_at FROM workers WHERE worker_id = :id")
+                .param("id", worker.workerId())
+                .query(Timestamp.class)
+                .single()
+                .toInstant();
+    }
+
+    @Test
+    void resultOfWorkerThatLostItsJob_isDiscardedAndCounted() throws InterruptedException {
+        double staleBefore = counterValue("stale.result.writes", "FLAKY");
+        UUID id = createJob("FLAKY", JsonNodeFactory.instance.objectNode().put("sleepMs", 1500), 5);
+        awaitStatus(id, JobStatus.RUNNING);
+
+        // iş çalışırken başka bir worker'a geçmiş gibi yap (recovery'nin yapacağı şey)
+        jdbc.sql("""
+                        UPDATE jobs
+                        SET locked_by = 'other-worker', lease_until = now() + interval '1 hour'
+                        WHERE id = :id
+                        """)
+                .param("id", id)
+                .update();
+
+        Instant deadline = Instant.now().plusSeconds(5);
+        while (Instant.now().isBefore(deadline)
+                && counterValue("stale.result.writes", "FLAKY") < staleBefore + 1) {
+            Thread.sleep(50);
+        }
+        assertThat(counterValue("stale.result.writes", "FLAKY")).isEqualTo(staleBefore + 1);
+
+        Job job = jobRepository.findById(id).orElseThrow();
+        assertThat(job.getStatus()).isEqualTo(JobStatus.RUNNING);
+        assertThat(job.getLockedBy()).isEqualTo("other-worker");
     }
 
     @Test
@@ -109,6 +226,7 @@ class JobWorkerIntegrationTest {
     void completedAndFailedJobs_areCountedByJobType() throws InterruptedException {
         double completedBefore = counterValue("jobs.completed", "SEND_ORDER_EMAIL");
         double failedBefore = counterValue("jobs.failed", "ALWAYS_FAIL");
+        double retriesBefore = counterValue("job.retries", "ALWAYS_FAIL");
 
         awaitStatus(createJob("SEND_ORDER_EMAIL", null), JobStatus.COMPLETED);
         awaitStatus(createJob("ALWAYS_FAIL", null), JobStatus.DEAD);
@@ -123,11 +241,18 @@ class JobWorkerIntegrationTest {
 
         assertThat(counterValue("jobs.completed", "SEND_ORDER_EMAIL")).isEqualTo(completedBefore + 1);
         assertThat(counterValue("jobs.failed", "ALWAYS_FAIL")).isEqualTo(failedBefore + 1);
+        // varsayılan 5 deneme: 4 tekrar, sonra DEAD
+        assertThat(counterValue("job.retries", "ALWAYS_FAIL")).isEqualTo(retriesBefore + 4);
     }
 
     private double counterValue(String name, String jobType) {
         Counter counter = meterRegistry.find(name).tag("job_type", jobType).counter();
         return counter == null ? 0 : counter.count();
+    }
+
+    private UUID createJob(String type, JsonNode payload, Integer maxAttempts) {
+        CreateJobRequest request = new CreateJobRequest(type, payload, null, null, maxAttempts);
+        return jobService.create(request, null).job().getId();
     }
 
     private UUID createJob(String type, Instant scheduledAt) {
@@ -140,7 +265,11 @@ class JobWorkerIntegrationTest {
 
     /** İş beklenen duruma gelene kadar en fazla 5 saniye bekler. */
     private Job awaitStatus(UUID id, JobStatus expected) {
-        Instant deadline = Instant.now().plusSeconds(5);
+        return awaitStatus(id, expected, Duration.ofSeconds(5));
+    }
+
+    private Job awaitStatus(UUID id, JobStatus expected, Duration timeout) {
+        Instant deadline = Instant.now().plus(timeout);
         while (Instant.now().isBefore(deadline)) {
             Job job = jobRepository.findById(id).orElseThrow();
             if (job.getStatus() == expected) {
