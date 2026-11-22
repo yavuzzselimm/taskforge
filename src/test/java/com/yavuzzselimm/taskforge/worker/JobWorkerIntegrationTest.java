@@ -17,6 +17,7 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.node.JsonNodeFactory;
 
+import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -58,6 +59,9 @@ class JobWorkerIntegrationTest {
 
     @Autowired
     private JdbcClient jdbc;
+
+    @Autowired
+    private JobWorker worker;
 
     @BeforeEach
     void cleanDatabase() {
@@ -139,6 +143,27 @@ class JobWorkerIntegrationTest {
 
         assertThat(job.getAttemptCount()).isEqualTo(1);
         assertThat(counterValue("expired.leases", "FLAKY")).isEqualTo(expiredBefore);
+    }
+
+    @Test
+    void worker_isRegisteredAndKeepsItsHeartbeatFresh() throws InterruptedException {
+        String sql = """
+                SELECT status || ' ' || capacity FROM workers WHERE worker_id = :id
+                """;
+        assertThat(jdbc.sql(sql).param("id", worker.workerId()).query(String.class).single())
+                .isEqualTo("RUNNING 4");
+
+        Instant first = lastHeartbeat();
+        Thread.sleep(1200);   // heartbeat 500 ms'de bir
+        assertThat(lastHeartbeat()).isAfter(first);
+    }
+
+    private Instant lastHeartbeat() {
+        return jdbc.sql("SELECT last_heartbeat_at FROM workers WHERE worker_id = :id")
+                .param("id", worker.workerId())
+                .query(Timestamp.class)
+                .single()
+                .toInstant();
     }
 
     @Test

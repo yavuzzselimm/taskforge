@@ -38,6 +38,7 @@ public class JobWorker implements SmartLifecycle {
     private static final Logger log = LoggerFactory.getLogger(JobWorker.class);
 
     private final JobClaimRepository claimRepository;
+    private final WorkerRepository workerRepository;
     private final JobHandlerRegistry handlerRegistry;
     private final RetryPolicy retryPolicy;
     private final MeterRegistry meterRegistry;
@@ -59,11 +60,13 @@ public class JobWorker implements SmartLifecycle {
     private ScheduledExecutorService heartbeat;
 
     public JobWorker(JobClaimRepository claimRepository,
+                     WorkerRepository workerRepository,
                      JobHandlerRegistry handlerRegistry,
                      RetryPolicy retryPolicy,
                      MeterRegistry meterRegistry,
                      WorkerProperties properties) {
         this.claimRepository = claimRepository;
+        this.workerRepository = workerRepository;
         this.handlerRegistry = handlerRegistry;
         this.retryPolicy = retryPolicy;
         this.meterRegistry = meterRegistry;
@@ -79,6 +82,7 @@ public class JobWorker implements SmartLifecycle {
 
     @Override
     public void start() {
+        workerRepository.register(workerId, threads);
         executor = Executors.newFixedThreadPool(threads,
                 Thread.ofPlatform().name(workerId + "-exec-", 1).factory());
         freeSlots = new Semaphore(threads);
@@ -111,6 +115,11 @@ public class JobWorker implements SmartLifecycle {
         }
         // çalışan işler bitene kadar lease'leri uzatılmaya devam etmeli, o yüzden en son
         heartbeat.shutdownNow();
+        try {
+            workerRepository.markStopped(workerId);
+        } catch (RuntimeException e) {
+            log.warn("Could not mark worker {} as stopped", workerId, e);
+        }
         log.info("Worker {} stopped", workerId);
     }
 
@@ -178,6 +187,7 @@ public class JobWorker implements SmartLifecycle {
     private void sendHeartbeat() {
         // LeaseRecovery'deki gibi: exception kaçarsa zamanlanmış görev bir daha çalışmaz
         try {
+            workerRepository.heartbeat(workerId);
             if (runningJobs.isEmpty()) {
                 return;
             }
