@@ -15,16 +15,22 @@ import tools.jackson.databind.node.JsonNodeFactory;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.fail;
 
 @SpringBootTest(properties = {
         "taskforge.worker.enabled=true",
-        "taskforge.worker.poll-interval-ms=100"
+        "taskforge.worker.poll-interval-ms=100",
+        "taskforge.worker.threads=4"
 })
-@Import({TestcontainersConfiguration.class, JobWorkerIntegrationTest.FailingHandlerConfig.class})
+@Import({TestcontainersConfiguration.class, JobWorkerIntegrationTest.TestHandlersConfig.class})
 class JobWorkerIntegrationTest {
 
     @Autowired
@@ -33,9 +39,13 @@ class JobWorkerIntegrationTest {
     @Autowired
     private JobRepository jobRepository;
 
+    @Autowired
+    private CountingHandler countingHandler;
+
     @BeforeEach
     void cleanDatabase() {
         jobRepository.deleteAll();
+        countingHandler.reset();
     }
 
     @Test
@@ -71,6 +81,24 @@ class JobWorkerIntegrationTest {
         assertThat(job.getAttemptCount()).isZero();
     }
 
+    @Test
+    void manyJobs_areCompletedExactlyOnceUsingMultipleThreads() {
+        List<UUID> ids = new ArrayList<>();
+        for (int i = 0; i < 40; i++) {
+            ids.add(createJob("COUNTING", null));
+        }
+
+        for (UUID id : ids) {
+            Job job = awaitStatus(id, JobStatus.COMPLETED);
+            assertThat(job.getAttemptCount()).isEqualTo(1);
+        }
+
+        assertThat(countingHandler.executions()).hasSize(40);
+        assertThat(countingHandler.executions().values()).allMatch(count -> count.get() == 1);
+        // gerçekten paralel çalıştı mı, ve thread sayısını aştı mı?
+        assertThat(countingHandler.maxConcurrent()).isBetween(2, 4);
+    }
+
     private UUID createJob(String type, Instant scheduledAt) {
         CreateJobRequest request = new CreateJobRequest(
                 type,
@@ -98,9 +126,8 @@ class JobWorkerIntegrationTest {
         return fail("Job %s expected %s but was %s", id, expected, job.getStatus());
     }
 
-    /** Yalnızca testlerde var olan, her zaman hata veren bir handler. */
     @TestConfiguration
-    static class FailingHandlerConfig {
+    static class TestHandlersConfig {
 
         @Bean
         JobHandler alwaysFailHandler() {
@@ -115,6 +142,49 @@ class JobWorkerIntegrationTest {
                     throw new IllegalStateException("simulated failure");
                 }
             };
+        }
+
+        @Bean
+        CountingHandler countingHandler() {
+            return new CountingHandler();
+        }
+    }
+
+    /** Her işin kaç kez çalıştığını ve aynı anda en fazla kaç iş çalıştığını sayar. */
+    static class CountingHandler implements JobHandler {
+
+        private final Map<UUID, AtomicInteger> executions = new ConcurrentHashMap<>();
+        private final AtomicInteger current = new AtomicInteger();
+        private final AtomicInteger maxConcurrent = new AtomicInteger();
+
+        @Override
+        public String jobType() {
+            return "COUNTING";
+        }
+
+        @Override
+        public void handle(JobContext context) throws InterruptedException {
+            int now = current.incrementAndGet();
+            maxConcurrent.accumulateAndGet(now, Math::max);
+            try {
+                executions.computeIfAbsent(context.jobId(), id -> new AtomicInteger()).incrementAndGet();
+                Thread.sleep(100);
+            } finally {
+                current.decrementAndGet();
+            }
+        }
+
+        Map<UUID, AtomicInteger> executions() {
+            return executions;
+        }
+
+        int maxConcurrent() {
+            return maxConcurrent.get();
+        }
+
+        void reset() {
+            executions.clear();
+            maxConcurrent.set(0);
         }
     }
 }
