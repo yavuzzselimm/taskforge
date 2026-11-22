@@ -80,7 +80,7 @@ class MultiWorkerIntegrationTest {
 
         for (String id : List.of("worker-a", "worker-b", "worker-c")) {
             JobWorker worker = new JobWorker(claimRepository, handlerRegistry, retryPolicy, meterRegistry,
-                    30, 50, 20, 2, 5, id);
+                    new WorkerProperties(id, 2, 50, 20, 30, 10_000, 5));
             workers.add(worker);
             worker.start();
         }

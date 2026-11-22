@@ -117,6 +117,18 @@ class JobClaimRepositoryTest {
         assertThat(claimRepository.markCompleted(fresh.id(), "fresh-worker", fresh.attempt())).isTrue();
     }
 
+    @Test
+    void renewLeases_extendsOnlyJobsOwnedByTheWorker() {
+        ClaimedJob claimed = claimRepository.claimNext("worker-1", 1).orElseThrow();
+
+        assertThat(claimRepository.renewLeases("worker-2", List.of(claimed.id()), 30)).isEmpty();
+        assertThat(claimRepository.renewLeases("worker-1", List.of(claimed.id()), 30))
+                .containsExactly(claimed.id());
+
+        Job job = jobRepository.findById(claimed.id()).orElseThrow();
+        assertThat(job.getLeaseUntil()).isAfter(Instant.now().plusSeconds(29));
+    }
+
     private UUID insertRunning(String lockedBy, String leaseUntilSql, int attempt, int maxAttempts) {
         return jdbc.sql("""
                         INSERT INTO jobs (job_type, payload, status, locked_by, lease_until,

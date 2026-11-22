@@ -37,7 +37,9 @@ import static org.assertj.core.api.Assertions.fail;
         "taskforge.retry.base-delay-ms=50",
         "taskforge.retry.max-delay-ms=200",
         "taskforge.handlers.flaky.enabled=true",
-        "taskforge.recovery.interval-ms=200"
+        "taskforge.recovery.interval-ms=200",
+        "taskforge.worker.lease-seconds=2",
+        "taskforge.worker.heartbeat-interval-ms=500"
 })
 @Import({TestcontainersConfiguration.class, JobWorkerIntegrationTest.TestHandlersConfig.class})
 class JobWorkerIntegrationTest {
@@ -123,6 +125,18 @@ class JobWorkerIntegrationTest {
     }
 
     @Test
+    void jobRunningLongerThanItsLease_isKeptAliveByHeartbeats() {
+        double expiredBefore = counterValue("expired.leases", "FLAKY");
+        // lease 2 saniye, iş 3,5 saniye sürüyor; heartbeat olmasa recovery işi elinden alırdı
+        UUID id = createJob("FLAKY", JsonNodeFactory.instance.objectNode().put("sleepMs", 3500), 5);
+
+        Job job = awaitStatus(id, JobStatus.COMPLETED, Duration.ofSeconds(10));
+
+        assertThat(job.getAttemptCount()).isEqualTo(1);
+        assertThat(counterValue("expired.leases", "FLAKY")).isEqualTo(expiredBefore);
+    }
+
+    @Test
     void jobScheduledInTheFuture_isNotPickedUpYet() throws InterruptedException {
         UUID id = createJob("SEND_ORDER_EMAIL", Instant.now().plus(Duration.ofHours(1)));
 
@@ -194,7 +208,11 @@ class JobWorkerIntegrationTest {
 
     /** İş beklenen duruma gelene kadar en fazla 5 saniye bekler. */
     private Job awaitStatus(UUID id, JobStatus expected) {
-        Instant deadline = Instant.now().plusSeconds(5);
+        return awaitStatus(id, expected, Duration.ofSeconds(5));
+    }
+
+    private Job awaitStatus(UUID id, JobStatus expected, Duration timeout) {
+        Instant deadline = Instant.now().plus(timeout);
         while (Instant.now().isBefore(deadline)) {
             Job job = jobRepository.findById(id).orElseThrow();
             if (job.getStatus() == expected) {

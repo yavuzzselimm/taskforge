@@ -4,6 +4,7 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
 
 import java.time.Duration;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -116,6 +117,30 @@ public class JobClaimRepository {
                 .param("delayMs", delay.toMillis())
                 .update();
         return updated == 1;
+    }
+
+    /**
+     * Worker'ın hâlâ sahibi olduğu işlerin lease'ini uzatır. Dönen liste, uzatılabilen
+     * işlerdir; listede olmayan bir iş artık bu worker'a ait değildir.
+     */
+    public List<UUID> renewLeases(String workerId, Collection<UUID> jobIds, long leaseSeconds) {
+        if (jobIds.isEmpty()) {
+            return List.of();
+        }
+        return jdbc.sql("""
+                        UPDATE jobs
+                        SET lease_until  = now() + (:leaseSeconds * interval '1 second'),
+                            heartbeat_at = now()
+                        WHERE id IN (:ids)
+                          AND status = 'RUNNING'
+                          AND locked_by = :workerId
+                        RETURNING id
+                        """)
+                .param("ids", jobIds)
+                .param("workerId", workerId)
+                .param("leaseSeconds", leaseSeconds)
+                .query(UUID.class)
+                .list();
     }
 
     /**

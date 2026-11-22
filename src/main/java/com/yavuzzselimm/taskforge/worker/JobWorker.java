@@ -8,17 +8,20 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
@@ -41,38 +44,37 @@ public class JobWorker implements SmartLifecycle {
     private final long leaseSeconds;
     private final long pollIntervalMs;
     private final long pollJitterMs;
+    private final long heartbeatIntervalMs;
     private final int threads;
     private final long shutdownTimeoutSeconds;
     private final String workerId;
+
+    // şu an bu worker'da çalışan işler; heartbeat bunların lease'ini uzatır
+    private final Map<UUID, ClaimedJob> runningJobs = new ConcurrentHashMap<>();
 
     private volatile boolean running;
     private ExecutorService executor;
     private Semaphore freeSlots;
     private Thread poller;
+    private ScheduledExecutorService heartbeat;
 
     public JobWorker(JobClaimRepository claimRepository,
                      JobHandlerRegistry handlerRegistry,
                      RetryPolicy retryPolicy,
                      MeterRegistry meterRegistry,
-                     @Value("${taskforge.worker.lease-seconds:30}") long leaseSeconds,
-                     @Value("${taskforge.worker.poll-interval-ms:1000}") long pollIntervalMs,
-                     @Value("${taskforge.worker.poll-jitter-ms:200}") long pollJitterMs,
-                     @Value("${taskforge.worker.threads:4}") int threads,
-                     @Value("${taskforge.worker.shutdown-timeout-seconds:20}") long shutdownTimeoutSeconds,
-                     @Value("${taskforge.worker.id:}") String configuredWorkerId) {
-        if (threads < 1) {
-            throw new IllegalArgumentException("taskforge.worker.threads must be at least 1");
-        }
+                     WorkerProperties properties) {
         this.claimRepository = claimRepository;
         this.handlerRegistry = handlerRegistry;
         this.retryPolicy = retryPolicy;
         this.meterRegistry = meterRegistry;
-        this.leaseSeconds = leaseSeconds;
-        this.pollIntervalMs = pollIntervalMs;
-        this.pollJitterMs = pollJitterMs;
-        this.threads = threads;
-        this.shutdownTimeoutSeconds = shutdownTimeoutSeconds;
-        this.workerId = configuredWorkerId.isBlank() ? generateWorkerId() : configuredWorkerId;
+        this.leaseSeconds = properties.leaseSeconds();
+        this.pollIntervalMs = properties.pollIntervalMs();
+        this.pollJitterMs = properties.pollJitterMs();
+        this.heartbeatIntervalMs = properties.heartbeatIntervalMs();
+        this.threads = properties.threads();
+        this.shutdownTimeoutSeconds = properties.shutdownTimeoutSeconds();
+        this.workerId = (properties.id() == null || properties.id().isBlank())
+                ? generateWorkerId() : properties.id();
     }
 
     @Override
@@ -80,9 +82,14 @@ public class JobWorker implements SmartLifecycle {
         executor = Executors.newFixedThreadPool(threads,
                 Thread.ofPlatform().name(workerId + "-exec-", 1).factory());
         freeSlots = new Semaphore(threads);
+        heartbeat = Executors.newSingleThreadScheduledExecutor(
+                Thread.ofPlatform().name(workerId + "-heartbeat").factory());
+        heartbeat.scheduleWithFixedDelay(this::sendHeartbeat,
+                heartbeatIntervalMs, heartbeatIntervalMs, TimeUnit.MILLISECONDS);
         running = true;
         poller = Thread.ofPlatform().name(workerId + "-poller").start(this::pollLoop);
-        log.info("Worker {} started ({} threads, lease {}s)", workerId, threads, leaseSeconds);
+        log.info("Worker {} started ({} threads, lease {}s, heartbeat every {} ms)",
+                workerId, threads, leaseSeconds, heartbeatIntervalMs);
     }
 
     @Override
@@ -102,6 +109,8 @@ public class JobWorker implements SmartLifecycle {
             executor.shutdownNow();
             Thread.currentThread().interrupt();
         }
+        // çalışan işler bitene kadar lease'leri uzatılmaya devam etmeli, o yüzden en son
+        heartbeat.shutdownNow();
         log.info("Worker {} stopped", workerId);
     }
 
@@ -146,6 +155,7 @@ public class JobWorker implements SmartLifecycle {
     }
 
     private void submit(ClaimedJob job) {
+        runningJobs.put(job.id(), job);
         try {
             executor.execute(() -> {
                 try {
@@ -153,13 +163,36 @@ public class JobWorker implements SmartLifecycle {
                 } catch (RuntimeException e) {
                     log.error("Unexpected error while processing job {}", job.id(), e);
                 } finally {
+                    runningJobs.remove(job.id());
                     freeSlots.release();
                 }
             });
         } catch (RejectedExecutionException e) {
             // Kapanış sırasında olabilir; iş RUNNING kalır, lease dolunca recovery alır
+            runningJobs.remove(job.id());
             freeSlots.release();
             log.warn("Job {} claimed but could not be submitted (worker shutting down)", job.id());
+        }
+    }
+
+    private void sendHeartbeat() {
+        // LeaseRecovery'deki gibi: exception kaçarsa zamanlanmış görev bir daha çalışmaz
+        try {
+            if (runningJobs.isEmpty()) {
+                return;
+            }
+            Set<UUID> ids = Set.copyOf(runningJobs.keySet());
+            Set<UUID> renewed = Set.copyOf(claimRepository.renewLeases(workerId, ids, leaseSeconds));
+
+            for (UUID id : ids) {
+                // iş bu arada bitmiş de olabilir; hâlâ çalışıyorsa sahipliği kaybettik demektir
+                if (!renewed.contains(id) && runningJobs.remove(id) != null) {
+                    log.warn("Lost ownership of job {} (lease expired before heartbeat); "
+                            + "its result will be discarded", id);
+                }
+            }
+        } catch (RuntimeException e) {
+            log.error("Heartbeat failed, will retry in {} ms", heartbeatIntervalMs, e);
         }
     }
 
