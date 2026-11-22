@@ -13,6 +13,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.node.JsonNodeFactory;
 
@@ -35,7 +36,8 @@ import static org.assertj.core.api.Assertions.fail;
         "taskforge.worker.threads=4",
         "taskforge.retry.base-delay-ms=50",
         "taskforge.retry.max-delay-ms=200",
-        "taskforge.handlers.flaky.enabled=true"
+        "taskforge.handlers.flaky.enabled=true",
+        "taskforge.recovery.interval-ms=200"
 })
 @Import({TestcontainersConfiguration.class, JobWorkerIntegrationTest.TestHandlersConfig.class})
 class JobWorkerIntegrationTest {
@@ -51,6 +53,9 @@ class JobWorkerIntegrationTest {
 
     @Autowired
     private MeterRegistry meterRegistry;
+
+    @Autowired
+    private JdbcClient jdbc;
 
     @BeforeEach
     void cleanDatabase() {
@@ -98,6 +103,23 @@ class JobWorkerIntegrationTest {
 
         assertThat(job.getAttemptCount()).isEqualTo(1);
         assertThat(job.getLastError()).contains("PermanentJobException");
+    }
+
+    @Test
+    void jobHeldByCrashedWorker_isRecoveredAndCompleted() {
+        // çökmüş bir worker'ın elinde kalmış gibi: RUNNING, lease'i dolmuş
+        UUID id = jdbc.sql("""
+                        INSERT INTO jobs (job_type, payload, status, locked_by, lease_until, attempt_count)
+                        VALUES ('SEND_ORDER_EMAIL', '{"orderId": "ORD-1"}'::jsonb, 'RUNNING',
+                                'crashed-worker', now() - interval '1 second', 1)
+                        RETURNING id
+                        """)
+                .query(UUID.class)
+                .single();
+
+        Job job = awaitStatus(id, JobStatus.COMPLETED);
+
+        assertThat(job.getAttemptCount()).isEqualTo(2);
     }
 
     @Test

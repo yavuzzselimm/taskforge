@@ -13,6 +13,8 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -64,5 +66,69 @@ class JobClaimRepositoryTest {
         assertThat(updated).isFalse();
         assertThat(jobRepository.findById(claimed.id()).orElseThrow().getStatus())
                 .isEqualTo(JobStatus.RUNNING);
+    }
+
+    @Test
+    void recoverExpiredLeases_givesJobWithAttemptsLeftAnotherTry() {
+        UUID id = insertRunning("crashed-worker", "now() - interval '1 second'", 1, 3);
+
+        List<RecoveredJob> recovered = claimRepository.recoverExpiredLeases(100);
+
+        assertThat(recovered).extracting(RecoveredJob::id).containsExactly(id);
+        assertThat(recovered.getFirst().previousOwner()).isEqualTo("crashed-worker");
+        Job job = jobRepository.findById(id).orElseThrow();
+        assertThat(job.getStatus()).isEqualTo(JobStatus.RETRY_WAIT);
+        assertThat(job.getLockedBy()).isNull();
+        assertThat(job.getLeaseUntil()).isNull();
+        assertThat(job.getLastError()).contains("crashed-worker");
+    }
+
+    @Test
+    void recoverExpiredLeases_marksJobDeadWhenAttemptsAreUsedUp() {
+        UUID id = insertRunning("crashed-worker", "now() - interval '1 second'", 3, 3);
+
+        claimRepository.recoverExpiredLeases(100);
+
+        assertThat(jobRepository.findById(id).orElseThrow().getStatus()).isEqualTo(JobStatus.DEAD);
+    }
+
+    @Test
+    void recoverExpiredLeases_leavesActiveLeasesAlone() {
+        UUID id = insertRunning("busy-worker", "now() + interval '30 seconds'", 1, 3);
+
+        assertThat(claimRepository.recoverExpiredLeases(100)).isEmpty();
+        assertThat(jobRepository.findById(id).orElseThrow().getStatus()).isEqualTo(JobStatus.RUNNING);
+    }
+
+    @Test
+    void lateWorker_cannotWriteResultAfterItsJobWasRecovered() {
+        ClaimedJob slow = claimRepository.claimNext("slow-worker", 30).orElseThrow();
+        // slow-worker takılıp kaldı ve lease'i doldu
+        jdbc.sql("UPDATE jobs SET lease_until = now() - interval '1 second' WHERE id = :id")
+                .param("id", slow.id())
+                .update();
+        claimRepository.recoverExpiredLeases(100);
+
+        ClaimedJob fresh = claimRepository.claimNext("fresh-worker", 30).orElseThrow();
+        assertThat(fresh.id()).isEqualTo(slow.id());
+        assertThat(fresh.attempt()).isEqualTo(2);
+
+        assertThat(claimRepository.markCompleted(slow.id(), "slow-worker", slow.attempt())).isFalse();
+        assertThat(claimRepository.markCompleted(fresh.id(), "fresh-worker", fresh.attempt())).isTrue();
+    }
+
+    private UUID insertRunning(String lockedBy, String leaseUntilSql, int attempt, int maxAttempts) {
+        return jdbc.sql("""
+                        INSERT INTO jobs (job_type, payload, status, locked_by, lease_until,
+                                          attempt_count, max_attempts)
+                        VALUES ('SEND_ORDER_EMAIL', '{}'::jsonb, 'RUNNING', :lockedBy, %s,
+                                :attempt, :maxAttempts)
+                        RETURNING id
+                        """.formatted(leaseUntilSql))
+                .param("lockedBy", lockedBy)
+                .param("attempt", attempt)
+                .param("maxAttempts", maxAttempts)
+                .query(UUID.class)
+                .single();
     }
 }

@@ -4,6 +4,7 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -115,6 +116,43 @@ public class JobClaimRepository {
                 .param("delayMs", delay.toMillis())
                 .update();
         return updated == 1;
+    }
+
+    /**
+     * Lease'i dolmuş RUNNING işleri geri alır: deneme hakkı varsa RETRY_WAIT, yoksa DEAD.
+     * Birden fazla process aynı anda çalıştırsa da güvenli; SKIP LOCKED sayesinde
+     * aynı satırı iki kez işlemezler.
+     */
+    public List<RecoveredJob> recoverExpiredLeases(int limit) {
+        return jdbc.sql("""
+                        UPDATE jobs
+                        SET status       = CASE WHEN attempt_count >= max_attempts
+                                                THEN 'DEAD' ELSE 'RETRY_WAIT' END,
+                            available_at = now(),
+                            last_error   = 'Lease expired while held by ' || locked_by,
+                            locked_by    = NULL,
+                            lease_until  = NULL,
+                            heartbeat_at = NULL,
+                            updated_at   = now()
+                        FROM (
+                            SELECT id, locked_by AS previous_owner
+                            FROM jobs
+                            WHERE status = 'RUNNING'
+                              AND lease_until < now()
+                            ORDER BY lease_until
+                            LIMIT :limit
+                            FOR UPDATE SKIP LOCKED
+                        ) expired
+                        WHERE jobs.id = expired.id
+                        RETURNING jobs.id, jobs.job_type, expired.previous_owner, jobs.status
+                        """)
+                .param("limit", limit)
+                .query((rs, rowNum) -> new RecoveredJob(
+                        rs.getObject("id", UUID.class),
+                        rs.getString("job_type"),
+                        rs.getString("previous_owner"),
+                        rs.getString("status")))
+                .list();
     }
 
     private static String truncate(String text) {

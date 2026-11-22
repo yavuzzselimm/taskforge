@@ -21,6 +21,9 @@ taskforge:
     lease-seconds: 30
     threads: 4
     shutdown-timeout-seconds: 20
+  recovery:
+    interval-ms: 5000
+    batch-size: 100
   retry:
     base-delay-ms: 1000
     max-delay-ms: 300000
