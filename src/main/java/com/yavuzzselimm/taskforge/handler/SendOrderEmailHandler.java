@@ -6,20 +6,23 @@ import org.springframework.stereotype.Component;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
+import java.util.UUID;
+
 /**
- * Sahte e-posta handler'ı: gerçekten e-posta göndermez, log'a yazar ve
- * kısa bir gecikme simüle eder. Amaç SMTP değil, iş akışının çalışmasıdır.
+ * Sipariş onay e-postası. İş birden fazla kez çalışabilir (worker sonucu yazamadan çökerse
+ * recovery onu tekrar kuyruğa alır), bu yüzden sağlayıcıya her denemede aynı anahtarı veriyoruz.
  */
 @Component
 public class SendOrderEmailHandler implements JobHandler {
 
     private static final Logger log = LoggerFactory.getLogger(SendOrderEmailHandler.class);
-    private static final long SIMULATED_SEND_MILLIS = 200;
 
     private final JsonMapper jsonMapper;
+    private final FakeEmailProvider emailProvider;
 
-    public SendOrderEmailHandler(JsonMapper jsonMapper) {
+    public SendOrderEmailHandler(JsonMapper jsonMapper, FakeEmailProvider emailProvider) {
         this.jsonMapper = jsonMapper;
+        this.emailProvider = emailProvider;
     }
 
     @Override
@@ -32,9 +35,15 @@ public class SendOrderEmailHandler implements JobHandler {
         JsonNode payload = jsonMapper.readTree(context.payload());
         String orderId = payload.path("orderId").asString("unknown");
 
-        Thread.sleep(SIMULATED_SEND_MILLIS);
+        boolean sent = emailProvider.send(idempotencyKey(context.jobId()), orderId);
+        if (!sent) {
+            log.info("Job {} attempt {}: email already sent earlier, nothing to do",
+                    context.jobId(), context.attempt());
+        }
+    }
 
-        log.info("Order confirmation email sent for order {} (job {}, attempt {})",
-                orderId, context.jobId(), context.attempt());
+    // Deneme numarası anahtara girmez; amaç tüm denemelerde aynı anahtarı kullanmak.
+    public static String idempotencyKey(UUID jobId) {
+        return "order-email-" + jobId;
     }
 }

@@ -5,6 +5,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.net.URI;
+import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 @RestController
@@ -32,8 +34,27 @@ public class JobController {
                 .body(new CreateJobResponse(job.getId(), job.getStatus()));
     }
 
+    @GetMapping
+    public JobPageResponse list(
+            @RequestParam(required = false) Set<JobStatus> status,
+            @RequestParam(required = false) String type,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size) {
+        return JobPageResponse.from(jobService.list(status, type, page, size));
+    }
+
     @GetMapping("/{id}")
     public JobResponse get(@PathVariable UUID id) {
         return JobResponse.from(jobService.get(id));
+    }
+
+    @PostMapping("/{id}/cancel")
+    public JobResponse cancel(@PathVariable UUID id) {
+        return JobResponse.from(jobService.cancel(id));
+    }
+
+    @GetMapping("/{id}/attempts")
+    public List<JobAttemptResponse> attempts(@PathVariable UUID id) {
+        return jobService.attempts(id);
     }
 }

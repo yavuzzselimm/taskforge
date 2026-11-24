@@ -1,8 +1,10 @@
 package com.yavuzzselimm.taskforge.worker;
 
 import com.yavuzzselimm.taskforge.TestcontainersConfiguration;
+import com.yavuzzselimm.taskforge.handler.FakeEmailProvider;
 import com.yavuzzselimm.taskforge.handler.JobContext;
 import com.yavuzzselimm.taskforge.handler.JobHandler;
+import com.yavuzzselimm.taskforge.handler.SendOrderEmailHandler;
 import com.yavuzzselimm.taskforge.job.*;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -62,6 +64,12 @@ class JobWorkerIntegrationTest {
 
     @Autowired
     private JobWorker worker;
+
+    @Autowired
+    private FakeEmailProvider emailProvider;
+
+    @Autowired
+    private JobAttemptRepository attemptRepository;
 
     @BeforeEach
     void cleanDatabase() {
@@ -131,6 +139,33 @@ class JobWorkerIntegrationTest {
         Job job = awaitStatus(id, JobStatus.COMPLETED);
 
         assertThat(job.getAttemptCount()).isEqualTo(2);
+    }
+
+    @Test
+    void jobRerunAfterWorkerCrash_doesNotSendTheEmailTwice() throws Exception {
+        // worker e-postayı gönderdi, sonra sonucu yazamadan öldü
+        UUID id = jdbc.sql("""
+                        INSERT INTO jobs (job_type, payload, status, locked_by, lease_until, attempt_count)
+                        VALUES ('SEND_ORDER_EMAIL', '{"orderId": "ORD-7"}'::jsonb, 'RUNNING',
+                                'crashed-worker', now() - interval '1 second', 1)
+                        RETURNING id
+                        """)
+                .query(UUID.class)
+                .single();
+        jdbc.sql("INSERT INTO job_attempts (job_id, attempt_no, worker_id) VALUES (:id, 1, 'crashed-worker')")
+                .param("id", id)
+                .update();
+        String key = SendOrderEmailHandler.idempotencyKey(id);
+        emailProvider.send(key, "ORD-7");
+
+        Job job = awaitStatus(id, JobStatus.COMPLETED);
+
+        assertThat(job.getAttemptCount()).isEqualTo(2);
+        assertThat(emailProvider.requestCount(key)).isEqualTo(2);
+        assertThat(emailProvider.deliveryCount(key)).isEqualTo(1);
+        assertThat(attemptRepository.findByJobId(id))
+                .extracting(JobAttemptResponse::outcome)
+                .containsExactly("LEASE_EXPIRED", "SUCCESS");
     }
 
     @Test
