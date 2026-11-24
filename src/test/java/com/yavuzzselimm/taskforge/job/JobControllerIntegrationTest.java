@@ -1,6 +1,7 @@
 package com.yavuzzselimm.taskforge.job;
 
 import com.yavuzzselimm.taskforge.TestcontainersConfiguration;
+import com.yavuzzselimm.taskforge.worker.JobClaimRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -10,6 +11,8 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.context.WebApplicationContext;
+
+import java.time.Duration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.startsWith;
@@ -30,6 +33,9 @@ class JobControllerIntegrationTest {
 
     @Autowired
     private JobRepository jobRepository;
+
+    @Autowired
+    private JobClaimRepository claimRepository;
 
     private MockMvc mockMvc;
 
@@ -144,7 +150,42 @@ class JobControllerIntegrationTest {
         assertThat(jobRepository.count()).isZero();
     }
 
+    @Test
+    void attempts_listsEveryAttemptInOrder() throws Exception {
+        String location = createJob(null);
 
+        var first = claimRepository.claimNext("worker-a", 30).orElseThrow();
+        claimRepository.markRetry(first.id(), "worker-a", first.attempt(), "smtp timeout", Duration.ZERO);
+        claimRepository.claimNext("worker-b", 30).orElseThrow();
+
+        mockMvc.perform(get(location + "/attempts"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(2))
+                .andExpect(jsonPath("$[0].attemptNo").value(1))
+                .andExpect(jsonPath("$[0].workerId").value("worker-a"))
+                .andExpect(jsonPath("$[0].outcome").value("TRANSIENT_FAILURE"))
+                .andExpect(jsonPath("$[0].errorSummary").value("smtp timeout"))
+                .andExpect(jsonPath("$[0].finishedAt").isNotEmpty())
+                .andExpect(jsonPath("$[1].attemptNo").value(2))
+                .andExpect(jsonPath("$[1].workerId").value("worker-b"))
+                .andExpect(jsonPath("$[1].outcome").doesNotExist())
+                .andExpect(jsonPath("$[1].finishedAt").doesNotExist());
+    }
+
+    @Test
+    void attempts_ofNewJobIsEmpty() throws Exception {
+        String location = createJob(null);
+
+        mockMvc.perform(get(location + "/attempts"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(0));
+    }
+
+    @Test
+    void attempts_ofUnknownJobReturns404() throws Exception {
+        mockMvc.perform(get("/api/v1/jobs/00000000-0000-0000-0000-000000000000/attempts"))
+                .andExpect(status().isNotFound());
+    }
 
     /** İş oluşturur ve Location başlığını döndürür. */
     private String createJob(String idempotencyKey) throws Exception {

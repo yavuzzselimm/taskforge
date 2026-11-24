@@ -5,6 +5,7 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -17,10 +18,14 @@ public class JobService {
     static final int DEFAULT_MAX_ATTEMPTS = 5;
 
     private final JobRepository jobRepository;
+    private final JobAttemptRepository attemptRepository;
     private final JobHandlerRegistry handlerRegistry;
 
-    public JobService(JobRepository jobRepository, JobHandlerRegistry handlerRegistry) {
+    public JobService(JobRepository jobRepository,
+                      JobAttemptRepository attemptRepository,
+                      JobHandlerRegistry handlerRegistry) {
         this.jobRepository = jobRepository;
+        this.attemptRepository = attemptRepository;
         this.handlerRegistry = handlerRegistry;
     }
 
@@ -68,6 +73,14 @@ public class JobService {
     public Job get(UUID id) {
         return jobRepository.findById(id)
                 .orElseThrow(() -> new JobNotFoundException(id));
+    }
+
+    public List<JobAttemptResponse> attempts(UUID id) {
+        // Hiç denenmemiş iş boş liste döner; olmayan iş 404 olmalı.
+        if (!jobRepository.existsById(id)) {
+            throw new JobNotFoundException(id);
+        }
+        return attemptRepository.findByJobId(id);
     }
 
     private void validateJobType(String jobType) {

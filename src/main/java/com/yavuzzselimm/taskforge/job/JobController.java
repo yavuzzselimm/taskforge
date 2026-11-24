@@ -5,6 +5,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.net.URI;
+import java.util.List;
 import java.util.UUID;
 
 @RestController
@@ -35,5 +36,10 @@ public class JobController {
     @GetMapping("/{id}")
     public JobResponse get(@PathVariable UUID id) {
         return JobResponse.from(jobService.get(id));
+    }
+
+    @GetMapping("/{id}/attempts")
+    public List<JobAttemptResponse> attempts(@PathVariable UUID id) {
+        return jobService.attempts(id);
     }
 }
