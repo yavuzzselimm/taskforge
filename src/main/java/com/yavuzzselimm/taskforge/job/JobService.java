@@ -5,8 +5,11 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Instant;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 @Service
@@ -16,6 +19,7 @@ public class JobService {
     static final int MAX_IDEMPOTENCY_KEY_LENGTH = 200;
     static final short DEFAULT_PRIORITY = 0;
     static final int DEFAULT_MAX_ATTEMPTS = 5;
+    private static final Set<JobStatus> CANCELLABLE = EnumSet.of(JobStatus.READY, JobStatus.RETRY_WAIT);
 
     private final JobRepository jobRepository;
     private final JobAttemptRepository attemptRepository;
@@ -73,6 +77,18 @@ public class JobService {
     public Job get(UUID id) {
         return jobRepository.findById(id)
                 .orElseThrow(() -> new JobNotFoundException(id));
+    }
+
+    @Transactional
+    public Job cancel(UUID id) {
+        int updated = jobRepository.cancelIfWaiting(
+                id, CANCELLABLE, JobStatus.CANCELLED, Instant.now());
+
+        Job job = get(id);
+        if (updated == 0 && job.getStatus() != JobStatus.CANCELLED) {
+            throw new JobNotCancellableException(id, job.getStatus());
+        }
+        return job;
     }
 
     public List<JobAttemptResponse> attempts(UUID id) {

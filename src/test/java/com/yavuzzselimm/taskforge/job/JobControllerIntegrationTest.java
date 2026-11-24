@@ -187,6 +187,68 @@ class JobControllerIntegrationTest {
                 .andExpect(status().isNotFound());
     }
 
+    @Test
+    void cancel_readyJobIsCancelledAndNeverClaimed() throws Exception {
+        String location = createJob(null);
+
+        mockMvc.perform(post(location + "/cancel"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("CANCELLED"));
+
+        assertThat(claimRepository.claimNext("worker-a", 30)).isEmpty();
+    }
+
+    @Test
+    void cancel_retryWaitJobIsCancelled() throws Exception {
+        String location = createJob(null);
+        var job = claimRepository.claimNext("worker-a", 30).orElseThrow();
+        claimRepository.markRetry(job.id(), "worker-a", job.attempt(), "boom", Duration.ofMinutes(5));
+
+        mockMvc.perform(post(location + "/cancel"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("CANCELLED"));
+    }
+
+    @Test
+    void cancel_twiceIsHarmless() throws Exception {
+        String location = createJob(null);
+
+        mockMvc.perform(post(location + "/cancel")).andExpect(status().isOk());
+        mockMvc.perform(post(location + "/cancel"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("CANCELLED"));
+    }
+
+    @Test
+    void cancel_runningJobReturns409AndKeepsRunning() throws Exception {
+        String location = createJob(null);
+        claimRepository.claimNext("worker-a", 30).orElseThrow();
+
+        mockMvc.perform(post(location + "/cancel"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.title").value("Job cannot be cancelled"))
+                .andExpect(jsonPath("$.status").value("RUNNING"));
+
+        mockMvc.perform(get(location)).andExpect(jsonPath("$.status").value("RUNNING"));
+    }
+
+    @Test
+    void cancel_completedJobReturns409() throws Exception {
+        String location = createJob(null);
+        var job = claimRepository.claimNext("worker-a", 30).orElseThrow();
+        claimRepository.markCompleted(job.id(), "worker-a", job.attempt());
+
+        mockMvc.perform(post(location + "/cancel"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.status").value("COMPLETED"));
+    }
+
+    @Test
+    void cancel_unknownJobReturns404() throws Exception {
+        mockMvc.perform(post("/api/v1/jobs/00000000-0000-0000-0000-000000000000/cancel"))
+                .andExpect(status().isNotFound());
+    }
+
     /** İş oluşturur ve Location başlığını döndürür. */
     private String createJob(String idempotencyKey) throws Exception {
         var request = post("/api/v1/jobs")

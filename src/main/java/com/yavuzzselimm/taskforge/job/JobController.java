@@ -38,6 +38,11 @@ public class JobController {
         return JobResponse.from(jobService.get(id));
     }
 
+    @PostMapping("/{id}/cancel")
+    public JobResponse cancel(@PathVariable UUID id) {
+        return JobResponse.from(jobService.cancel(id));
+    }
+
     @GetMapping("/{id}/attempts")
     public List<JobAttemptResponse> attempts(@PathVariable UUID id) {
         return jobService.attempts(id);

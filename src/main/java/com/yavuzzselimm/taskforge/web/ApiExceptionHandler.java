@@ -1,6 +1,7 @@
 package com.yavuzzselimm.taskforge.web;
 
 import com.yavuzzselimm.taskforge.job.InvalidJobRequestException;
+import com.yavuzzselimm.taskforge.job.JobNotCancellableException;
 import com.yavuzzselimm.taskforge.job.JobNotFoundException;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
@@ -21,6 +22,14 @@ public class ApiExceptionHandler {
     public ProblemDetail handleNotFound(JobNotFoundException ex) {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
         problem.setTitle("Job not found");
+        return problem;
+    }
+
+    @ExceptionHandler(JobNotCancellableException.class)
+    public ProblemDetail handleNotCancellable(JobNotCancellableException ex) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.getMessage());
+        problem.setTitle("Job cannot be cancelled");
+        problem.setProperty("status", ex.getStatus());
         return problem;
     }
 
