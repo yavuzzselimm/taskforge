@@ -50,6 +50,9 @@ class JobCancelConcurrencyTest {
                     null, null, null), null).job().getId());
         }
 
+        // DB saati birkaç ms geride olabilir; son işler de claim edilebilir olsun.
+        Thread.sleep(50);
+
         ExecutorService pool = Executors.newFixedThreadPool(CLAIMERS + CANCELLERS);
         CountDownLatch start = new CountDownLatch(1);
         List<Future<?>> tasks = new ArrayList<>();

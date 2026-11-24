@@ -1,6 +1,7 @@
 package com.yavuzzselimm.taskforge.job;
 
 import com.yavuzzselimm.taskforge.TestcontainersConfiguration;
+import com.yavuzzselimm.taskforge.worker.ClaimedJob;
 import com.yavuzzselimm.taskforge.worker.JobClaimRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -154,9 +155,9 @@ class JobControllerIntegrationTest {
     void attempts_listsEveryAttemptInOrder() throws Exception {
         String location = createJob(null);
 
-        var first = claimRepository.claimNext("worker-a", 30).orElseThrow();
+        var first = claim("worker-a");
         claimRepository.markRetry(first.id(), "worker-a", first.attempt(), "smtp timeout", Duration.ZERO);
-        claimRepository.claimNext("worker-b", 30).orElseThrow();
+        claim("worker-b");
 
         mockMvc.perform(get(location + "/attempts"))
                 .andExpect(status().isOk())
@@ -195,13 +196,16 @@ class JobControllerIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("CANCELLED"));
 
+        // İptal edilen iş daha eski; alınabilir olsaydı önce o seçilirdi.
+        String other = createJob(null);
+        assertThat(other).endsWith(claim("worker-a").id().toString());
         assertThat(claimRepository.claimNext("worker-a", 30)).isEmpty();
     }
 
     @Test
     void cancel_retryWaitJobIsCancelled() throws Exception {
         String location = createJob(null);
-        var job = claimRepository.claimNext("worker-a", 30).orElseThrow();
+        var job = claim("worker-a");
         claimRepository.markRetry(job.id(), "worker-a", job.attempt(), "boom", Duration.ofMinutes(5));
 
         mockMvc.perform(post(location + "/cancel"))
@@ -222,7 +226,7 @@ class JobControllerIntegrationTest {
     @Test
     void cancel_runningJobReturns409AndKeepsRunning() throws Exception {
         String location = createJob(null);
-        claimRepository.claimNext("worker-a", 30).orElseThrow();
+        claim("worker-a");
 
         mockMvc.perform(post(location + "/cancel"))
                 .andExpect(status().isConflict())
@@ -235,7 +239,7 @@ class JobControllerIntegrationTest {
     @Test
     void cancel_completedJobReturns409() throws Exception {
         String location = createJob(null);
-        var job = claimRepository.claimNext("worker-a", 30).orElseThrow();
+        var job = claim("worker-a");
         claimRepository.markCompleted(job.id(), "worker-a", job.attempt());
 
         mockMvc.perform(post(location + "/cancel"))
@@ -300,6 +304,20 @@ class JobControllerIntegrationTest {
         mockMvc.perform(get("/api/v1/jobs").param("size", "101")).andExpect(status().isBadRequest());
         mockMvc.perform(get("/api/v1/jobs").param("page", "-1")).andExpect(status().isBadRequest());
         mockMvc.perform(get("/api/v1/jobs").param("status", "WAITING")).andExpect(status().isBadRequest());
+    }
+
+    // İşin available_at'ini Java saati yazıyor, claim ise DB saatine bakıyor. Docker'daki
+    // PostgreSQL birkaç ms geride olabildiği için yeni iş hemen alınamayabilir.
+    private ClaimedJob claim(String workerId) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 2_000;
+        while (System.currentTimeMillis() < deadline) {
+            var job = claimRepository.claimNext(workerId, 30);
+            if (job.isPresent()) {
+                return job.get();
+            }
+            Thread.sleep(10);
+        }
+        throw new AssertionError("no claimable job within 2s");
     }
 
     private String createJobOfType(String type) throws Exception {
