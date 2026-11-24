@@ -2,6 +2,9 @@ package com.yavuzzselimm.taskforge.job;
 
 import com.yavuzzselimm.taskforge.handler.JobHandlerRegistry;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -19,6 +22,8 @@ public class JobService {
     static final int MAX_IDEMPOTENCY_KEY_LENGTH = 200;
     static final short DEFAULT_PRIORITY = 0;
     static final int DEFAULT_MAX_ATTEMPTS = 5;
+    static final int MAX_PAGE_SIZE = 100;
+    private static final Sort NEWEST_FIRST = Sort.by(Sort.Order.desc("createdAt"), Sort.Order.desc("id"));
     private static final Set<JobStatus> CANCELLABLE = EnumSet.of(JobStatus.READY, JobStatus.RETRY_WAIT);
 
     private final JobRepository jobRepository;
@@ -77,6 +82,20 @@ public class JobService {
     public Job get(UUID id) {
         return jobRepository.findById(id)
                 .orElseThrow(() -> new JobNotFoundException(id));
+    }
+
+    @Transactional(readOnly = true)
+    public Page<Job> list(Set<JobStatus> statuses, String type, int page, int size) {
+        if (page < 0) {
+            throw new InvalidJobRequestException("page must be >= 0");
+        }
+        if (size < 1 || size > MAX_PAGE_SIZE) {
+            throw new InvalidJobRequestException("size must be between 1 and " + MAX_PAGE_SIZE);
+        }
+        Set<JobStatus> filter = (statuses == null || statuses.isEmpty())
+                ? EnumSet.allOf(JobStatus.class)
+                : statuses;
+        return jobRepository.search(filter, type, PageRequest.of(page, size, NEWEST_FIRST));
     }
 
     @Transactional

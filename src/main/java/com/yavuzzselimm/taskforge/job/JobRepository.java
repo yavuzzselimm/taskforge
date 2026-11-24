@@ -1,5 +1,7 @@
 package com.yavuzzselimm.taskforge.job;
 
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
@@ -13,6 +15,15 @@ import java.util.UUID;
 public interface JobRepository extends JpaRepository<Job, UUID> {
 
     Optional<Job> findByIdempotencyKey(String idempotencyKey);
+
+    @Query("""
+            SELECT j FROM Job j
+            WHERE j.status IN :statuses
+              AND (:type IS NULL OR j.jobType = :type)
+            """)
+    Page<Job> search(@Param("statuses") Collection<JobStatus> statuses,
+                     @Param("type") String type,
+                     Pageable pageable);
 
     // Kontrol ve yazma tek ifadede: worker işi araya girip claim ettiyse 0 döner.
     @Modifying(clearAutomatically = true, flushAutomatically = true)

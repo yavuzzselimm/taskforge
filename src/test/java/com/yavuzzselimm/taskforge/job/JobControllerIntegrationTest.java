@@ -249,6 +249,67 @@ class JobControllerIntegrationTest {
                 .andExpect(status().isNotFound());
     }
 
+    @Test
+    void list_returnsNewestFirstWithoutPayload() throws Exception {
+        createJobOfType("SEND_ORDER_EMAIL");
+        createJobOfType("GENERATE_REPORT");
+
+        mockMvc.perform(get("/api/v1/jobs"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.totalElements").value(2))
+                .andExpect(jsonPath("$.items[0].type").value("GENERATE_REPORT"))
+                .andExpect(jsonPath("$.items[1].type").value("SEND_ORDER_EMAIL"))
+                .andExpect(jsonPath("$.items[0].payload").doesNotExist());
+    }
+
+    @Test
+    void list_filtersByStatusAndType() throws Exception {
+        String toCancel = createJobOfType("SEND_ORDER_EMAIL");
+        createJobOfType("SEND_ORDER_EMAIL");
+        createJobOfType("SEND_ORDER_EMAIL");
+        createJobOfType("GENERATE_REPORT");
+        mockMvc.perform(post(toCancel + "/cancel")).andExpect(status().isOk());
+
+        mockMvc.perform(get("/api/v1/jobs").param("status", "READY").param("type", "SEND_ORDER_EMAIL"))
+                .andExpect(jsonPath("$.totalElements").value(2));
+        mockMvc.perform(get("/api/v1/jobs").param("status", "CANCELLED"))
+                .andExpect(jsonPath("$.totalElements").value(1))
+                .andExpect(jsonPath("$.items[0].status").value("CANCELLED"));
+        mockMvc.perform(get("/api/v1/jobs").param("status", "READY", "CANCELLED"))
+                .andExpect(jsonPath("$.totalElements").value(4));
+    }
+
+    @Test
+    void list_paginates() throws Exception {
+        for (int i = 0; i < 5; i++) {
+            createJobOfType("SEND_ORDER_EMAIL");
+        }
+
+        mockMvc.perform(get("/api/v1/jobs").param("size", "2").param("page", "2"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(1))
+                .andExpect(jsonPath("$.page").value(2))
+                .andExpect(jsonPath("$.size").value(2))
+                .andExpect(jsonPath("$.totalElements").value(5))
+                .andExpect(jsonPath("$.totalPages").value(3));
+    }
+
+    @Test
+    void list_rejectsBadParameters() throws Exception {
+        mockMvc.perform(get("/api/v1/jobs").param("size", "0")).andExpect(status().isBadRequest());
+        mockMvc.perform(get("/api/v1/jobs").param("size", "101")).andExpect(status().isBadRequest());
+        mockMvc.perform(get("/api/v1/jobs").param("page", "-1")).andExpect(status().isBadRequest());
+        mockMvc.perform(get("/api/v1/jobs").param("status", "WAITING")).andExpect(status().isBadRequest());
+    }
+
+    private String createJobOfType(String type) throws Exception {
+        return mockMvc.perform(post("/api/v1/jobs")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"type\":\"" + type + "\",\"payload\":{}}"))
+                .andExpect(status().isAccepted())
+                .andReturn().getResponse().getHeader("Location");
+    }
+
     /** İş oluşturur ve Location başlığını döndürür. */
     private String createJob(String idempotencyKey) throws Exception {
         var request = post("/api/v1/jobs")
